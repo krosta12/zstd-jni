@@ -1,6 +1,8 @@
 package com.github.luben.zstd;
 
-import com.github.luben.zstd.util.Native;
+import com.github.luben.zstd.mite.ByteBuffers;
+import com.github.luben.zstd.mite.FrameProgressionRaw;
+import com.github.luben.zstd.mite.ZstdMite;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -11,7 +13,7 @@ import java.util.Arrays;
 public class ZstdCompressCtx extends AutoCloseBase {
 
     static {
-        Native.load();
+        ZstdMite.ensureLoaded();
     }
 
     private long nativePtr = 0;
@@ -24,9 +26,13 @@ public class ZstdCompressCtx extends AutoCloseBase {
 
     private long seqprod_state = 0;
 
-    private static native long init();
+    private static long init() {
+        return ZstdMite.client().zm_createCCtx();
+    }
 
-    private static native void free(long ptr);
+    private static void free(long ptr) {
+        ZstdMite.client().zm_freeCCtx(ptr);
+    }
 
     /**
      * Create a context for faster compress operations
@@ -74,7 +80,9 @@ public class ZstdCompressCtx extends AutoCloseBase {
         return this;
     }
 
-    private static native void setLevel0(long ptr, int level);
+    private static void setLevel0(long ptr, int level) {
+        ZstdMite.client().zm_setLevel(ptr, level);
+    }
 
     /**
      * Enable or disable magicless frames
@@ -101,7 +109,9 @@ public class ZstdCompressCtx extends AutoCloseBase {
         releaseSharedLock();
         return this;
     }
-    private static native void setChecksum0(long ptr, boolean checksumFlag);
+    private static void setChecksum0(long ptr, boolean checksumFlag) {
+        ZstdMite.client().zm_setChecksum(ptr, checksumFlag);
+    }
 
 
     @NotNull
@@ -266,7 +276,9 @@ public class ZstdCompressCtx extends AutoCloseBase {
         releaseSharedLock();
         return this;
     }
-    private static native void setContentSize0(long ptr, boolean contentSizeFlag);
+    private static void setContentSize0(long ptr, boolean contentSizeFlag) {
+        ZstdMite.client().zm_setContentSize(ptr, contentSizeFlag);
+    }
 
     /**
      * Enable or disable dictID
@@ -280,7 +292,9 @@ public class ZstdCompressCtx extends AutoCloseBase {
         releaseSharedLock();
         return this;
     }
-    private static native void setDictID0(long ptr, boolean dictIDFlag);
+    private static void setDictID0(long ptr, boolean dictIDFlag) {
+        ZstdMite.client().zm_setDictID(ptr, dictIDFlag);
+    }
 
     /**
      * Enable or disable LongDistanceMatching and set the window size
@@ -442,7 +456,9 @@ public class ZstdCompressCtx extends AutoCloseBase {
         }
         return this;
     }
-    private native long loadCDictFast0(long ptr, @Nullable ZstdDictCompress dict);
+    private long loadCDictFast0(long ptr, @Nullable ZstdDictCompress dict) {
+        return ZstdMite.client().zm_refCDict(ptr, dict == null ? 0 : dict.nativePtr());
+    }
 
     /**
      * Load compression dictionary to be used for subsequently compressed frames.
@@ -467,7 +483,9 @@ public class ZstdCompressCtx extends AutoCloseBase {
         }
         return this;
     }
-    private native long loadCDict0(long ptr, byte @Nullable [] dict);
+    private long loadCDict0(long ptr, byte @Nullable [] dict) {
+        return ZstdMite.client().zm_loadCDict(ptr, dict, dict == null ? 0 : dict.length);
+    }
 
     /**
      * Tells how much data has been ingested (read from input),
@@ -484,7 +502,12 @@ public class ZstdCompressCtx extends AutoCloseBase {
         }
     }
     @NotNull
-    private static native ZstdFrameProgression getFrameProgression0(long ptr);
+    private static ZstdFrameProgression getFrameProgression0(long ptr) {
+        FrameProgressionRaw raw = new FrameProgressionRaw();
+        ZstdMite.client().zm_getFrameProgression(ptr, raw);
+        return new ZstdFrameProgression(raw.ingested, raw.consumed, raw.produced,
+                raw.flushed, raw.currentJobID, raw.nbActiveWorkers);
+    }
 
     /**
      * Clear all state and parameters from the compression context. This leaves the object in a
@@ -507,7 +530,9 @@ public class ZstdCompressCtx extends AutoCloseBase {
         }
 
     }
-    private static native long reset0(long ptr);
+    private static long reset0(long ptr) {
+        return ZstdMite.client().zm_resetCCtx(ptr);
+    }
 
     /**
      * Promise to compress a certain number of source bytes. Knowing the number of bytes to compress
@@ -529,7 +554,9 @@ public class ZstdCompressCtx extends AutoCloseBase {
             releaseSharedLock();
         }
     }
-    private static native long setPledgedSrcSize0(long ptr, long srcSize);
+    private static long setPledgedSrcSize0(long ptr, long srcSize) {
+        return ZstdMite.client().zm_setPledgedSrcSize(ptr, srcSize);
+    }
 
     /**
      * Compress as much of the <code>src</code> {@link ByteBuffer} into the <code>dst</code> {@link
@@ -556,37 +583,42 @@ public class ZstdCompressCtx extends AutoCloseBase {
 
         acquireSharedLock();
         try {
-            final long result;
-            if (dst.isDirect()) {
-                if (src.isDirect()) {
-                    result = compressDirectByteBufferStream0(nativePtr, dst, dst.position(), dst.limit(), src,
-                            src.position(), src.limit(), endOp.value());
-                } else {
-                    result = compressByteArrayToDirectByteBufferStream0(nativePtr, dst, dst.position(), dst.limit(),
-                            src.array(), src.arrayOffset(), src.position(), src.limit(), endOp.value());
-                }
-            } else if (src.isDirect()) {
-                result = compressDirectByteBufferToByteArrayStream0(nativePtr, dst.array(), dst.arrayOffset(),
-                        dst.position(), dst.limit(), src, src.position(), src.limit(), endOp.value());
-            } else {
-                result = compressByteArrayStream0(nativePtr, dst.array(), dst.arrayOffset(), dst.position(), dst.limit(),
-                        src.array(), src.arrayOffset(), src.position(), src.limit(), endOp.value());
-            }
-            return updateStreamPositions(result, dst, src);
+            return compressStreamImpl(dst, src, endOp);
         } finally {
             releaseSharedLock();
         }
     }
 
-    private static native long compressByteArrayToDirectByteBufferStream0(long ptr, @NotNull ByteBuffer dst,
-            int dstOffset, int dstSize, byte @NotNull [] src, int srcArrayOffset, int srcOffset, int srcSize, int endOp);
+    /**
+     * Shared implementation of the buffer-stream entry points. Both buffers may
+     * be direct or array-backed: the affected regions are copied into arrays
+     * (semi-mite's marshalling unit), the native call advances them, and the
+     * produced bytes plus the positions are written back exactly once.
+     */
+    private boolean compressStreamImpl(@NotNull ByteBuffer dst, @NotNull ByteBuffer src,
+                                       @NotNull EndDirective endOp) {
+        int dstStart = dst.position();
+        int dstLength = dst.limit() - dstStart;
+        int srcStart = src.position();
+        int srcLength = src.limit() - srcStart;
 
-    private static native long compressDirectByteBufferToByteArrayStream0(long ptr, byte @NotNull [] dst,
-            int dstArrayOffset, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize, int endOp);
+        byte[] dstCopy = ByteBuffers.read(dst, dstStart, dstLength);
+        byte[] srcCopy = ByteBuffers.read(src, srcStart, srcLength);
 
-    private static native long compressByteArrayStream0(long ptr, byte @NotNull [] dst, int dstArrayOffset,
-            int dstOffset, int dstSize,
-            byte @NotNull [] src, int srcArrayOffset, int srcOffset, int srcSize, int endOp);
+        long result = ZstdMite.client().zm_compressStream(nativePtr,
+                dstCopy, 0, dstLength, srcCopy, 0, srcLength, endOp.value());
+        if ((result & 0x80000000L) != 0) {
+            long code = -(result & 0xFF);
+            throw new ZstdException(code, Zstd.getErrorName(code));
+        }
+
+        int produced = (int) (result >>> 32) & 0x7FFFFFFF;
+        int consumed = (int) result & 0x7FFFFFFF;
+        ByteBuffers.write(dst, dstStart, dstCopy, 0, produced);
+        dst.position(dstStart + produced);
+        src.position(srcStart + consumed);
+        return (result >>> 63) == 1;
+    }
 
     /**
      * Compress as much of the <code>src</code> {@link ByteBuffer} into the <code>dst</code> {@link
@@ -601,31 +633,10 @@ public class ZstdCompressCtx extends AutoCloseBase {
         ensureOpen();
         acquireSharedLock();
         try {
-            long result = compressDirectByteBufferStream0(nativePtr, dst, dst.position(), dst.limit(), src, src.position(), src.limit(), endOp.value());
-            return updateStreamPositions(result, dst, src);
+            return compressStreamImpl(dst, src, endOp);
         } finally {
             releaseSharedLock();
         }
-    }
-
-    /**
-     * 4 pieces of information are packed into the return value of this method, which must be
-     * treated as an unsigned long. The highest bit is set if all data has been flushed from
-     * internal buffers. The next 31 bits are the new position of the destination buffer. The next
-     * bit is set if an error occurred. If an error occurred, the lowest 31 bits encode a zstd error
-     * code. Otherwise, the lowest 31 bits are the new position of the source buffer.
-     */
-    private static native long compressDirectByteBufferStream0(long ptr, @NotNull ByteBuffer dst, int dstOffset, int dstSize,
-            @NotNull ByteBuffer src, int srcOffset, int srcSize, int endOp);
-
-    private static boolean updateStreamPositions(long result, @NotNull ByteBuffer dst, @NotNull ByteBuffer src) {
-        if ((result & 0x80000000L) != 0) {
-            long code = -(result & 0xFF);
-            throw new ZstdException(code, Zstd.getErrorName(code));
-        }
-        src.position((int)(result & 0x7FFFFFFF));
-        dst.position((int)(result >>> 32) & 0x7FFFFFFF);
-        return (result >>> 63) == 1;
     }
 
     /**
@@ -671,7 +682,15 @@ public class ZstdCompressCtx extends AutoCloseBase {
         }
     }
 
-    private static native long compressDirectByteBuffer0(long ptr, @NotNull ByteBuffer dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize);
+    private static long compressDirectByteBuffer0(long ptr, @NotNull ByteBuffer dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize) {
+        byte[] dstCopy = ByteBuffers.read(dst, dstOffset, dstSize);
+        byte[] srcCopy = ByteBuffers.read(src, srcOffset, srcSize);
+        long size = ZstdMite.client().zm_compress2(ptr, dstCopy, 0, dstSize, srcCopy, 0, srcSize);
+        if (!Zstd.isError(size) && size > 0) {
+            ByteBuffers.write(dst, dstOffset, dstCopy, 0, (int) size);
+        }
+        return size;
+    }
 
     /**
      * Compresses byte array 'srcBuff' into byte array 'dstBuff' reusing this ZstdCompressCtx.
@@ -709,7 +728,9 @@ public class ZstdCompressCtx extends AutoCloseBase {
         }
     }
 
-    private static native long compressByteArray0(long ptr, byte @NotNull [] dst, int dstOffset, int dstSize, byte @NotNull [] src, int srcOffset, int srcSize);
+    private static long compressByteArray0(long ptr, byte @NotNull [] dst, int dstOffset, int dstSize, byte @NotNull [] src, int srcOffset, int srcSize) {
+        return ZstdMite.client().zm_compress2(ptr, dst, dstOffset, dstSize, src, srcOffset, srcSize);
+    }
 
     /* Convenience methods */
 

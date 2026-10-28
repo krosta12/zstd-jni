@@ -1,6 +1,8 @@
 package com.github.luben.zstd;
 
-import com.github.luben.zstd.util.Native;
+import com.github.luben.zstd.mite.ByteBuffers;
+import com.github.luben.zstd.mite.MiteIoPos;
+import com.github.luben.zstd.mite.ZstdMite;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -13,7 +15,7 @@ import java.nio.ByteBuffer;
 public class ZstdDirectBufferCompressingStreamNoFinalizer implements Closeable, Flushable {
 
     static {
-        Native.load();
+        ZstdMite.ensureLoaded();
     }
 
     private @Nullable ByteBuffer target;
@@ -48,16 +50,66 @@ public class ZstdDirectBufferCompressingStreamNoFinalizer implements Closeable, 
     private byte @Nullable [] dict = null;
     private @Nullable ZstdDictCompress fastDict = null;
 
-    /* JNI methods */
-    private static native long recommendedCOutSize();
-    private static native long createCStream();
-    private static native long  freeCStream(long ctx);
-    private native long initCStream(long ctx, int level);
-    private native long initCStreamWithDict(long ctx, byte @NotNull [] dict, int dict_size, int level);
-    private native long initCStreamWithFastDict(long ctx, @NotNull ZstdDictCompress dict);
-    private native long compressDirectByteBuffer(long ctx, @NotNull ByteBuffer dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize);
-    private native long flushStream(long ctx, @NotNull ByteBuffer dst, int dstOffset, int dstSize);
-    private native long endStream(long ctx, @NotNull ByteBuffer dst, int dstOffset, int dstSize);
+    /* semi-mite bridge methods */
+    private static long recommendedCOutSize() {
+        return ZstdMite.client().zm_CStreamOutSize();
+    }
+
+    private static long createCStream() {
+        return ZstdMite.client().zm_createCStream();
+    }
+
+    private static long freeCStream(long ctx) {
+        return ZstdMite.client().zm_freeCStream(ctx);
+    }
+
+    private long initCStream(long ctx, int level) {
+        return ZstdMite.client().zm_initCStream(ctx, level);
+    }
+
+    private long initCStreamWithDict(long ctx, byte @NotNull [] dict, int dict_size, int level) {
+        return ZstdMite.client().zm_initCStreamWithDict(ctx, dict, dict_size, level);
+    }
+
+    private long initCStreamWithFastDict(long ctx, @NotNull ZstdDictCompress dict) {
+        return ZstdMite.client().zm_initCStreamWithFastDict(ctx, dict.nativePtr());
+    }
+
+    private long compressDirectByteBuffer(long ctx, @NotNull ByteBuffer dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize) {
+        MiteIoPos positions = new MiteIoPos();
+        byte[] dstCopy = ByteBuffers.read(dst, dstOffset, dstSize);
+        byte[] srcCopy = ByteBuffers.read(src, srcOffset, srcSize);
+        long result = ZstdMite.client().zm_cStreamCompress(ctx, dstCopy, 0, dstSize,
+                srcCopy, 0, srcSize, positions);
+        this.consumed = positions.srcPos;
+        this.produced = positions.dstPos;
+        if (!Zstd.isError(result) && positions.dstPos > 0) {
+            ByteBuffers.write(dst, dstOffset, dstCopy, 0, positions.dstPos);
+        }
+        return result;
+    }
+
+    private long flushStream(long ctx, @NotNull ByteBuffer dst, int dstOffset, int dstSize) {
+        MiteIoPos positions = new MiteIoPos();
+        byte[] dstCopy = ByteBuffers.read(dst, dstOffset, dstSize);
+        long result = ZstdMite.client().zm_cStreamFlush(ctx, dstCopy, 0, dstSize, positions);
+        this.produced = positions.dstPos;
+        if (!Zstd.isError(result) && positions.dstPos > 0) {
+            ByteBuffers.write(dst, dstOffset, dstCopy, 0, positions.dstPos);
+        }
+        return result;
+    }
+
+    private long endStream(long ctx, @NotNull ByteBuffer dst, int dstOffset, int dstSize) {
+        MiteIoPos positions = new MiteIoPos();
+        byte[] dstCopy = ByteBuffers.read(dst, dstOffset, dstSize);
+        long result = ZstdMite.client().zm_cStreamEnd(ctx, dstCopy, 0, dstSize, positions);
+        this.produced = positions.dstPos;
+        if (!Zstd.isError(result) && positions.dstPos > 0) {
+            ByteBuffers.write(dst, dstOffset, dstCopy, 0, positions.dstPos);
+        }
+        return result;
+    }
 
     public @NotNull ZstdDirectBufferCompressingStreamNoFinalizer setDict(byte @NotNull [] dict) {
         if (initialized) {

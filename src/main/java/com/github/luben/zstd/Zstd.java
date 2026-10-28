@@ -1,6 +1,7 @@
 package com.github.luben.zstd;
 
-import com.github.luben.zstd.util.Native;
+import com.github.luben.zstd.mite.ByteBuffers;
+import com.github.luben.zstd.mite.ZstdMite;
 
 import org.jetbrains.annotations.NotNull;
 
@@ -18,8 +19,21 @@ public class Zstd {
      */
     public static final long MAX_DECOMPRESS_SIZE;
 
+    /**
+     * The {@code ZSTD_error_*} constants, in the order of the {@code err*}
+     * accessors below. Filled once from the bundled libzstd through semi-mite.
+     */
+    private static final long[] ERROR_CODES;
+
     static {
-        Native.load();
+        ZstdMite.ensureLoaded();
+        int[] codes = new int[23];
+        ZstdMite.client().zm_errorConstants(codes);
+        ERROR_CODES = new long[codes.length];
+        for (int i = 0; i < codes.length; i++) {
+            ERROR_CODES[i] = codes[i];
+        }
+
         long configuredMax;
         try {
             String prop = System.getProperty(maxDecompressSizeOverride);
@@ -219,7 +233,9 @@ public class Zstd {
      * @return  the number of bytes written into buffer 'dst' or an error code if
      *          it fails (which can be tested using ZSTD_isError())
      */
-    public static native long compressUnsafe(long dst, long dstSize, long src, long srcSize, int level, boolean checksumFlag);
+    public static long compressUnsafe(long dst, long dstSize, long src, long srcSize, int level, boolean checksumFlag) {
+        return ZstdMite.client().zm_compressUnsafe(dst, dstSize, src, srcSize, level, checksumFlag);
+    }
 
     /**
      * Compresses buffer 'src' into direct buffer 'dst'.
@@ -508,7 +524,9 @@ public class Zstd {
      *          or an errorCode if it fails (which can be tested using ZSTD_isError())
      *
      */
-    public static native long decompressUnsafe(long dst, long dstSize, long src, long srcSize);
+    public static long decompressUnsafe(long dst, long dstSize, long src, long srcSize) {
+        return ZstdMite.client().zm_decompressUnsafe(dst, dstSize, src, srcSize);
+    }
 
     /**
      * Decompresses buffer 'src' into buffer 'dst' with dictionary.
@@ -613,32 +631,121 @@ public class Zstd {
     }
 
     /* Advance API */
-    public static native int loadDictDecompress(long stream, byte @NotNull [] dict, int dict_size);
-    public static native int loadFastDictDecompress(long stream, @NotNull ZstdDictDecompress dict);
-    public static native int loadDictCompress(long stream, byte @NotNull [] dict, int dict_size);
-    public static native int loadFastDictCompress(long stream, @NotNull ZstdDictCompress dict);
-    public static native void registerSequenceProducer(long stream, long seqProdState, long seqProdFunction);
-    public static native int setCompressionChecksums(long stream, boolean useChecksums);
-    public static native int setCompressionMagicless(long stream, boolean useMagicless);
-    public static native int setCompressionLevel(long stream, int level);
-    public static native int setCompressionLong(long stream, int windowLog);
-    public static native int setCompressionWorkers(long stream, int workers);
-    public static native int setCompressionOverlapLog(long stream, int overlapLog);
-    public static native int setCompressionJobSize(long stream, int jobSize);
-    public static native int setCompressionTargetLength(long stream, int targetLength);
-    public static native int setCompressionMinMatch(long stream, int minMatch);
-    public static native int setCompressionSearchLog(long stream, int searchLog);
-    public static native int setCompressionChainLog(long stream, int chainLog);
-    public static native int setCompressionHashLog(long stream, int hashLog);
-    public static native int setCompressionWindowLog(long stream, int windowLog);
-    public static native int setCompressionStrategy(long stream, int strategy);
-    public static native int setDecompressionLongMax(long stream, int windowLogMax);
-    public static native int setDecompressionMagicless(long stream, boolean useMagicless);
-    public static native int setRefMultipleDDicts(long stream, boolean useMultiple);
-    public static native int setValidateSequences(long stream, int validateSequences);
-    public static native int setSequenceProducerFallback(long stream, boolean fallbackFlag);
-    public static native int setSearchForExternalRepcodes(long stream, int searchRepcodes);
-    public static native int setEnableLongDistanceMatching(long stream, int enableLDM);
+    public static int loadDictDecompress(long stream, byte @NotNull [] dict, int dict_size) {
+        if (dict == null) {
+            return (int) -Zstd.errDictionaryWrong();
+        }
+        return (int) ZstdMite.client().zm_loadDDict(stream, dict, dict_size);
+    }
+
+    public static int loadFastDictDecompress(long stream, @NotNull ZstdDictDecompress dict) {
+        if (dict == null || dict.nativePtr() == 0) {
+            return (int) -Zstd.errDictionaryWrong();
+        }
+        return (int) ZstdMite.client().zm_refDDict(stream, dict.nativePtr());
+    }
+
+    public static int loadDictCompress(long stream, byte @NotNull [] dict, int dict_size) {
+        if (dict == null) {
+            return (int) -Zstd.errDictionaryWrong();
+        }
+        return (int) ZstdMite.client().zm_loadCDict(stream, dict, dict_size);
+    }
+
+    public static int loadFastDictCompress(long stream, @NotNull ZstdDictCompress dict) {
+        if (dict == null || dict.nativePtr() == 0) {
+            return (int) -Zstd.errDictionaryWrong();
+        }
+        return (int) ZstdMite.client().zm_refCDict(stream, dict.nativePtr());
+    }
+
+    public static void registerSequenceProducer(long stream, long seqProdState, long seqProdFunction) {
+        ZstdMite.client().zm_registerSequenceProducer(stream, seqProdState, seqProdFunction);
+    }
+
+    public static int setCompressionChecksums(long stream, boolean useChecksums) {
+        return ZstdMite.client().zm_setCompressionChecksums(stream, useChecksums);
+    }
+
+    public static int setCompressionMagicless(long stream, boolean useMagicless) {
+        return ZstdMite.client().zm_setCompressionMagicless(stream, useMagicless);
+    }
+
+    public static int setCompressionLevel(long stream, int level) {
+        return ZstdMite.client().zm_setCompressionLevel(stream, level);
+    }
+
+    public static int setCompressionLong(long stream, int windowLog) {
+        return ZstdMite.client().zm_setCompressionLong(stream, windowLog);
+    }
+
+    public static int setCompressionWorkers(long stream, int workers) {
+        return ZstdMite.client().zm_setCompressionWorkers(stream, workers);
+    }
+
+    public static int setCompressionOverlapLog(long stream, int overlapLog) {
+        return ZstdMite.client().zm_setCompressionOverlapLog(stream, overlapLog);
+    }
+
+    public static int setCompressionJobSize(long stream, int jobSize) {
+        return ZstdMite.client().zm_setCompressionJobSize(stream, jobSize);
+    }
+
+    public static int setCompressionTargetLength(long stream, int targetLength) {
+        return ZstdMite.client().zm_setCompressionTargetLength(stream, targetLength);
+    }
+
+    public static int setCompressionMinMatch(long stream, int minMatch) {
+        return ZstdMite.client().zm_setCompressionMinMatch(stream, minMatch);
+    }
+
+    public static int setCompressionSearchLog(long stream, int searchLog) {
+        return ZstdMite.client().zm_setCompressionSearchLog(stream, searchLog);
+    }
+
+    public static int setCompressionChainLog(long stream, int chainLog) {
+        return ZstdMite.client().zm_setCompressionChainLog(stream, chainLog);
+    }
+
+    public static int setCompressionHashLog(long stream, int hashLog) {
+        return ZstdMite.client().zm_setCompressionHashLog(stream, hashLog);
+    }
+
+    public static int setCompressionWindowLog(long stream, int windowLog) {
+        return ZstdMite.client().zm_setCompressionWindowLog(stream, windowLog);
+    }
+
+    public static int setCompressionStrategy(long stream, int strategy) {
+        return ZstdMite.client().zm_setCompressionStrategy(stream, strategy);
+    }
+
+    public static int setDecompressionLongMax(long stream, int windowLogMax) {
+        return ZstdMite.client().zm_setDecompressionLongMax(stream, windowLogMax);
+    }
+
+    public static int setDecompressionMagicless(long stream, boolean useMagicless) {
+        return ZstdMite.client().zm_setDecompressionMagicless(stream, useMagicless);
+    }
+
+    public static int setRefMultipleDDicts(long stream, boolean useMultiple) {
+        return ZstdMite.client().zm_setRefMultipleDDicts(stream, useMultiple);
+    }
+
+    public static int setValidateSequences(long stream, int validateSequences) {
+        return ZstdMite.client().zm_setValidateSequences(stream, validateSequences);
+    }
+
+    public static int setSequenceProducerFallback(long stream, boolean fallbackFlag) {
+        return ZstdMite.client().zm_setSequenceProducerFallback(stream, fallbackFlag);
+    }
+
+    public static int setSearchForExternalRepcodes(long stream, int searchRepcodes) {
+        return ZstdMite.client().zm_setSearchForExternalRepcodes(stream, searchRepcodes);
+    }
+
+    public static int setEnableLongDistanceMatching(long stream, int enableLDM) {
+        return ZstdMite.client().zm_setEnableLongDistanceMatching(stream, enableLDM);
+    }
 
     /* Utility methods */
     /**
@@ -666,7 +773,9 @@ public class Zstd {
         return size;
     }
 
-    private static native long findFrameCompressedSize0(byte @NotNull [] src, int srcPosition, int srcSize);
+    private static long findFrameCompressedSize0(byte @NotNull [] src, int srcPosition, int srcSize) {
+        return ZstdMite.client().zm_findFrameCompressedSize(src, srcPosition, srcSize);
+    }
 
     /**
      * Return the compressed size of a frame within a buffer.
@@ -713,7 +822,13 @@ public class Zstd {
      * @return the number of bytes of the compressed frame
      *         negative if there is an error decoding the frame header
      */
-    public static native long findDirectByteBufferFrameCompressedSize(@NotNull ByteBuffer src, int srcPosition, int srcSize);
+    public static long findDirectByteBufferFrameCompressedSize(@NotNull ByteBuffer src, int srcPosition, int srcSize) {
+        if (srcPosition < 0 || srcSize < 0 || srcPosition > src.capacity() - srcSize) {
+            return -Zstd.errGeneric();
+        }
+        return ZstdMite.client().zm_findFrameCompressedSize(
+                ByteBuffers.read(src, srcPosition, srcSize), 0, srcSize);
+    }
 
     /**
      * Return the original size of a compressed buffer (if known)
@@ -736,7 +851,9 @@ public class Zstd {
         return getFrameContentSize0(src, srcPosition, srcSize, magicless);
     }
 
-    private static native long getFrameContentSize0(byte @NotNull [] src, int srcPosition, int srcSize, boolean magicless);
+    private static long getFrameContentSize0(byte @NotNull [] src, int srcPosition, int srcSize, boolean magicless) {
+        return ZstdMite.client().zm_getFrameContentSize(src, srcPosition, srcSize, magicless);
+    }
 
     /**
      * Return the original size of a compressed buffer (if known)
@@ -761,7 +878,9 @@ public class Zstd {
         return decompressedSize0(src, srcPosition, srcSize, magicless);
     }
 
-    private static native long decompressedSize0(byte @NotNull [] src, int srcPosition, int srcSize, boolean magicless);
+    private static long decompressedSize0(byte @NotNull [] src, int srcPosition, int srcSize, boolean magicless) {
+        return ZstdMite.client().zm_decompressedSize(src, srcPosition, srcSize, magicless);
+    }
 
     /**
      * Return the original size of a compressed buffer (if known)
@@ -860,7 +979,14 @@ public class Zstd {
      * Use `getDirectByteBufferFrameContentSize` to also return error codes from zstd
      */
     @Deprecated
-    public static native long decompressedDirectByteBufferSize(@NotNull ByteBuffer src, int srcPosition, int srcSize, boolean magicless);
+    public static long decompressedDirectByteBufferSize(@NotNull ByteBuffer src, int srcPosition, int srcSize, boolean magicless) {
+        if (srcPosition < 0 || srcSize < 0 || srcPosition > src.capacity() - srcSize) {
+            return -Zstd.errGeneric();
+        }
+        long size = ZstdMite.client().zm_decompressedSize(
+                ByteBuffers.read(src, srcPosition, srcSize), 0, srcSize, magicless);
+        return size > 0 ? size : 0;
+    }
 
     /**
      * Return the original size of a compressed buffer (if known)
@@ -873,7 +999,13 @@ public class Zstd {
      *         0 if the original size is not known
      *         negative if there is an error decoding the frame header
      */
-    public static native long getDirectByteBufferFrameContentSize(@NotNull ByteBuffer src, int srcPosition, int srcSize, boolean magicless);
+    public static long getDirectByteBufferFrameContentSize(@NotNull ByteBuffer src, int srcPosition, int srcSize, boolean magicless) {
+        if (srcPosition < 0 || srcSize < 0 || srcPosition > src.capacity() - srcSize) {
+            return -Zstd.errGeneric();
+        }
+        return ZstdMite.client().zm_getFrameContentSize(
+                ByteBuffers.read(src, srcPosition, srcSize), 0, srcSize, magicless);
+    }
 
     /**
      * Return the original size of a compressed buffer (if known)
@@ -911,7 +1043,9 @@ public class Zstd {
      * @param srcSize the size of the data to be compressed
      * @return the maximum size of the compressed data
      */
-    public static native long    compressBound(long srcSize);
+    public static long    compressBound(long srcSize) {
+        return ZstdMite.client().zm_compressBound(srcSize);
+    }
 
     /**
      * Error handling
@@ -920,35 +1054,43 @@ public class Zstd {
      * @return if the return code signals an error
      */
 
-    public static native boolean isError(long code);
-    public static native @NotNull String  getErrorName(long code);
-    public static native long    getErrorCode(long code);
+    public static boolean isError(long code) {
+        return ZstdMite.client().zm_isError(code);
+    }
+
+    public static @NotNull String  getErrorName(long code) {
+        return ZstdMite.client().zm_getErrorName(code);
+    }
+
+    public static long    getErrorCode(long code) {
+        return ZstdMite.client().zm_getErrorCode(code);
+    }
 
 
     /* Stable constants from the zstd_errors header */
-    public static native long errNoError();
-    public static native long errGeneric();
-    public static native long errPrefixUnknown();
-    public static native long errVersionUnsupported();
-    public static native long errFrameParameterUnsupported();
-    public static native long errFrameParameterWindowTooLarge();
-    public static native long errCorruptionDetected();
-    public static native long errChecksumWrong();
-    public static native long errDictionaryCorrupted();
-    public static native long errDictionaryWrong();
-    public static native long errDictionaryCreationFailed();
-    public static native long errParameterUnsupported();
-    public static native long errParameterOutOfBound();
-    public static native long errTableLogTooLarge();
-    public static native long errMaxSymbolValueTooLarge();
-    public static native long errMaxSymbolValueTooSmall();
-    public static native long errStageWrong();
-    public static native long errInitMissing();
-    public static native long errMemoryAllocation();
-    public static native long errWorkSpaceTooSmall();
-    public static native long errDstSizeTooSmall();
-    public static native long errSrcSizeWrong();
-    public static native long errDstBufferNull();
+    public static long errNoError() { return ERROR_CODES[0]; }
+    public static long errGeneric() { return ERROR_CODES[1]; }
+    public static long errPrefixUnknown() { return ERROR_CODES[2]; }
+    public static long errVersionUnsupported() { return ERROR_CODES[3]; }
+    public static long errFrameParameterUnsupported() { return ERROR_CODES[4]; }
+    public static long errFrameParameterWindowTooLarge() { return ERROR_CODES[5]; }
+    public static long errCorruptionDetected() { return ERROR_CODES[6]; }
+    public static long errChecksumWrong() { return ERROR_CODES[7]; }
+    public static long errDictionaryCorrupted() { return ERROR_CODES[8]; }
+    public static long errDictionaryWrong() { return ERROR_CODES[9]; }
+    public static long errDictionaryCreationFailed() { return ERROR_CODES[10]; }
+    public static long errParameterUnsupported() { return ERROR_CODES[11]; }
+    public static long errParameterOutOfBound() { return ERROR_CODES[12]; }
+    public static long errTableLogTooLarge() { return ERROR_CODES[13]; }
+    public static long errMaxSymbolValueTooLarge() { return ERROR_CODES[14]; }
+    public static long errMaxSymbolValueTooSmall() { return ERROR_CODES[15]; }
+    public static long errStageWrong() { return ERROR_CODES[16]; }
+    public static long errInitMissing() { return ERROR_CODES[17]; }
+    public static long errMemoryAllocation() { return ERROR_CODES[18]; }
+    public static long errWorkSpaceTooSmall() { return ERROR_CODES[19]; }
+    public static long errDstSizeTooSmall() { return ERROR_CODES[20]; }
+    public static long errSrcSizeWrong() { return ERROR_CODES[21]; }
+    public static long errDstBufferNull() { return ERROR_CODES[22]; }
 
     /**
      * Creates a new dictionary to tune a kind of samples
@@ -984,7 +1126,27 @@ public class Zstd {
         }
         return trainFromBuffer0(samples, dictBuffer, legacy, compressionLevel);
     }
-    private static native long trainFromBuffer0(byte @NotNull [][] samples, byte @NotNull [] dictBuffer, boolean legacy, int compressionLevel);
+    private static long trainFromBuffer0(byte @NotNull [][] samples, byte @NotNull [] dictBuffer, boolean legacy, int compressionLevel) {
+        long total = 0;
+        for (byte[] sample : samples) {
+            total += sample.length;
+            if (total > Integer.MAX_VALUE) {
+                throw new ZstdException(Zstd.errMemoryAllocation(),
+                        "total sample size is greater than MAX_INT");
+            }
+        }
+        byte[] flat = new byte[(int) total];
+        int[] sizes = new int[samples.length];
+        int cursor = 0;
+        for (int i = 0; i < samples.length; i++) {
+            byte[] sample = samples[i];
+            sizes[i] = sample.length;
+            System.arraycopy(sample, 0, flat, cursor, sample.length);
+            cursor += sample.length;
+        }
+        return ZstdMite.client().zm_trainFromBuffer(flat, flat.length, sizes, sizes.length,
+                dictBuffer, dictBuffer.length, legacy, compressionLevel);
+    }
 
     /**
      * Creates a new dictionary to tune a kind of samples
@@ -1022,7 +1184,18 @@ public class Zstd {
     }
 
 
-    private static native long trainFromBufferDirect0(@NotNull ByteBuffer samples, int @NotNull [] sampleSizes, @NotNull ByteBuffer dictBuffer, boolean legacy, int compressionLevel);
+    private static long trainFromBufferDirect0(@NotNull ByteBuffer samples, int @NotNull [] sampleSizes, @NotNull ByteBuffer dictBuffer, boolean legacy, int compressionLevel) {
+        int samplesCapacity = samples.capacity();
+        int dictCapacity = dictBuffer.capacity();
+        byte[] flat = ByteBuffers.read(samples, 0, samplesCapacity);
+        byte[] dict = new byte[dictCapacity];
+        long result = ZstdMite.client().zm_trainFromBuffer(flat, flat.length, sampleSizes,
+                sampleSizes.length, dict, dictCapacity, legacy, compressionLevel);
+        if (!Zstd.isError(result) && result > 0) {
+            ByteBuffers.write(dictBuffer, 0, dict, 0, (int) result);
+        }
+        return result;
+    }
 
     /**
      * Get DictId from a compressed frame
@@ -1030,7 +1203,9 @@ public class Zstd {
      * @param src compressed frame
      * @return DictId or 0 if not available
      */
-    public static native long getDictIdFromFrame(byte @NotNull [] src);
+    public static long getDictIdFromFrame(byte @NotNull [] src) {
+        return ZstdMite.client().zm_getDictIdFromFrame(src, src.length);
+    }
 
     /**
      * Get DictId from a compressed ByteBuffer frame
@@ -1038,7 +1213,14 @@ public class Zstd {
      * @param src compressed frame
      * @return DictId or 0 if not available
      */
-    public static native long getDictIdFromFrameBuffer(@NotNull ByteBuffer src);
+    public static long getDictIdFromFrameBuffer(@NotNull ByteBuffer src) {
+        int capacity = src.capacity();
+        if (capacity <= 0) {
+            return 0;
+        }
+        return ZstdMite.client().zm_getDictIdFromFrame(
+                ByteBuffers.read(src, 0, capacity), capacity);
+    }
 
     /**
      * Get DictId of a dictionary
@@ -1046,9 +1228,17 @@ public class Zstd {
      * @param dict dictionary
      * @return DictId or 0 if not available
      */
-    public static native long getDictIdFromDict(byte @NotNull [] dict);
+    public static long getDictIdFromDict(byte @NotNull [] dict) {
+        return ZstdMite.client().zm_getDictIdFromDict(dict, dict.length);
+    }
 
-    private static native long getDictIdFromDictDirect(@NotNull ByteBuffer dict, int offset, int length);
+    private static long getDictIdFromDictDirect(@NotNull ByteBuffer dict, int offset, int length) {
+        if (offset < 0 || length < 0 || offset > dict.capacity() - length) {
+            return 0;
+        }
+        return ZstdMite.client().zm_getDictIdFromDict(
+                ByteBuffers.read(dict, offset, length), length);
+    }
 
     /**
      * Get DictId of a dictionary
@@ -1096,22 +1286,22 @@ public class Zstd {
     }
 
     /* Constants from the zstd_static header */
-    public static native int magicNumber();
-    public static native int windowLogMin();
-    public static native int windowLogMax();
-    public static native int chainLogMin();
-    public static native int chainLogMax();
-    public static native int hashLogMin();
-    public static native int hashLogMax();
-    public static native int searchLogMin();
-    public static native int searchLogMax();
-    public static native int searchLengthMin();
-    public static native int searchLengthMax();
-    public static native int blockSizeMax();
-    public static native int defaultCompressionLevel();
+    public static int magicNumber() { return ZstdMite.client().zm_magicNumber(); }
+    public static int windowLogMin() { return ZstdMite.client().zm_windowLogMin(); }
+    public static int windowLogMax() { return ZstdMite.client().zm_windowLogMax(); }
+    public static int chainLogMin() { return ZstdMite.client().zm_chainLogMin(); }
+    public static int chainLogMax() { return ZstdMite.client().zm_chainLogMax(); }
+    public static int hashLogMin() { return ZstdMite.client().zm_hashLogMin(); }
+    public static int hashLogMax() { return ZstdMite.client().zm_hashLogMax(); }
+    public static int searchLogMin() { return ZstdMite.client().zm_searchLogMin(); }
+    public static int searchLogMax() { return ZstdMite.client().zm_searchLogMax(); }
+    public static int searchLengthMin() { return ZstdMite.client().zm_searchLengthMin(); }
+    public static int searchLengthMax() { return ZstdMite.client().zm_searchLengthMax(); }
+    public static int blockSizeMax() { return ZstdMite.client().zm_blockSizeMax(); }
+    public static int defaultCompressionLevel() { return ZstdMite.client().zm_defaultCompressionLevel(); }
     /* Min/max compression levels */
-    public static native int minCompressionLevel();
-    public static native int maxCompressionLevel();
+    public static int minCompressionLevel() { return ZstdMite.client().zm_minCompressionLevel(); }
+    public static int maxCompressionLevel() { return ZstdMite.client().zm_maxCompressionLevel(); }
 
 
 

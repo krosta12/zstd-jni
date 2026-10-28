@@ -1,6 +1,7 @@
 package com.github.luben.zstd;
 
-import com.github.luben.zstd.util.Native;
+import com.github.luben.zstd.mite.MiteIoPos;
+import com.github.luben.zstd.mite.ZstdMite;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -18,7 +19,7 @@ import java.nio.ByteBuffer;
 public class ZstdOutputStreamNoFinalizer extends FilterOutputStream {
 
     static {
-        Native.load();
+        ZstdMite.ensureLoaded();
     }
 
     /* Opaque pointer to Zstd context object */
@@ -37,14 +38,46 @@ public class ZstdOutputStreamNoFinalizer extends FilterOutputStream {
     // keep the active dict from GC
     private @Nullable ZstdDictCompress active_dict;
 
-    /* JNI methods */
-    public static native long recommendedCOutSize();
-    private static native long createCStream();
-    private static native long  freeCStream(long ctx);
-    private native long resetCStream(long ctx);
-    private native long compressStream(long ctx, byte @NotNull [] dst, int dst_size, byte @NotNull [] src, int src_size);
-    private native long flushStream(long ctx, byte @NotNull [] dst, int dst_size);
-    private native long endStream(long ctx, byte @NotNull [] dst, int dst_size);
+    /* semi-mite bridge methods */
+    public static long recommendedCOutSize() {
+        return ZstdMite.client().zm_CStreamOutSize();
+    }
+
+    private static long createCStream() {
+        return ZstdMite.client().zm_createCStream();
+    }
+
+    private static long  freeCStream(long ctx) {
+        return ZstdMite.client().zm_freeCStream(ctx);
+    }
+
+    private long resetCStream(long ctx) {
+        return ZstdMite.client().zm_resetCStream(ctx);
+    }
+
+    private long compressStream(long ctx, byte @NotNull [] dst, int dst_size, byte @NotNull [] src, int src_size) {
+        MiteIoPos positions = new MiteIoPos();
+        positions.srcPos = (int) srcPos;
+        long result = ZstdMite.client().zm_outputStreamCompress(ctx,
+                dst, dst_size, src, src_size, positions);
+        srcPos = positions.srcPos;
+        dstPos = positions.dstPos;
+        return result;
+    }
+
+    private long flushStream(long ctx, byte @NotNull [] dst, int dst_size) {
+        MiteIoPos positions = new MiteIoPos();
+        long result = ZstdMite.client().zm_outputStreamFlush(ctx, dst, dst_size, positions);
+        dstPos = positions.dstPos;
+        return result;
+    }
+
+    private long endStream(long ctx, byte @NotNull [] dst, int dst_size) {
+        MiteIoPos positions = new MiteIoPos();
+        long result = ZstdMite.client().zm_outputStreamEnd(ctx, dst, dst_size, positions);
+        dstPos = positions.dstPos;
+        return result;
+    }
 
 
     /**

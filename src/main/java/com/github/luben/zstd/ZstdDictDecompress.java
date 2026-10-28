@@ -1,6 +1,7 @@
 package com.github.luben.zstd;
 
-import com.github.luben.zstd.util.Native;
+import com.github.luben.zstd.mite.ByteBuffers;
+import com.github.luben.zstd.mite.ZstdMite;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -10,18 +11,32 @@ import java.nio.ByteBuffer;
 public class ZstdDictDecompress extends SharedDictBase {
 
     static {
-        Native.load();
+        ZstdMite.ensureLoaded();
     }
 
     private long nativePtr = 0L;
 
     private ByteBuffer sharedDict = null;
 
-    private native void init(byte @NotNull [] dict, int dict_offset, int dict_size);
+    private void init(byte @NotNull [] dict, int dict_offset, int dict_size) {
+        nativePtr = ZstdMite.client().zm_createDDict(dict, dict_offset, dict_size);
+    }
 
-    private native void initDirect(@NotNull ByteBuffer dict, int dict_offset, int dict_size, int byReference);
+    /**
+     * The buffer is copied into a native DDict even when {@code byReference} is
+     * requested: semi-mite's array marshalling cannot hand ownership of a
+     * direct-buffer address to native code. The observable contract (the
+     * dictionary content is frozen when this constructor returns) is unchanged
+     * and safer than borrowing caller memory.
+     */
+    private void initDirect(@NotNull ByteBuffer dict, int dict_offset, int dict_size, int byReference) {
+        byte[] copy = ByteBuffers.read(dict, dict_offset, dict_size);
+        nativePtr = ZstdMite.client().zm_createDDict(copy, 0, dict_size);
+    }
 
-    private native void free();
+    private void free() {
+        ZstdMite.client().zm_freeDDict(nativePtr);
+    }
 
     /**
      * Get the byte buffer that backs this dict, if any, or null if not backed by a byte buffer.
@@ -101,8 +116,8 @@ public class ZstdDictDecompress extends SharedDictBase {
 
 
     /**
-     * The raw {@code ZSTD_DDict*}. Package-private: it lets the JDK 22+ (FFM) variants pass the pointer to
-     * {@code ZSTD_DCtx_refDDict} directly, the way the JNI code reads it off this object with {@code GetLongField}.
+     * The raw {@code ZSTD_DDict*} handle. Package-private: it is passed to the
+     * semi-mite bridge for {@code ZSTD_DCtx_refDDict} calls.
      */
     long nativePtr() {
         return nativePtr;

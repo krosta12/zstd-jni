@@ -1,6 +1,7 @@
 package com.github.luben.zstd;
 
-import com.github.luben.zstd.util.Native;
+import com.github.luben.zstd.mite.MiteIoPos;
+import com.github.luben.zstd.mite.ZstdMite;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
@@ -8,7 +9,7 @@ import java.nio.ByteBuffer;
 
 public class ZstdBufferDecompressingStreamNoFinalizer extends BaseZstdBufferDecompressingStreamNoFinalizer {
     static {
-        Native.load();
+        ZstdMite.ensureLoaded();
     }
 
     public ZstdBufferDecompressingStreamNoFinalizer(@NotNull ByteBuffer source) {
@@ -64,13 +65,28 @@ public class ZstdBufferDecompressingStreamNoFinalizer extends BaseZstdBufferDeco
         return (int) recommendedDOutSizeNative();
     }
 
-    private native long createDStreamNative();
+    private long createDStreamNative() {
+        return ZstdMite.client().zm_createDStream();
+    }
 
-    private native long freeDStreamNative(long stream);
+    private long freeDStreamNative(long stream) {
+        return ZstdMite.client().zm_freeDStream(stream);
+    }
 
-    private native long initDStreamNative(long stream);
+    private long initDStreamNative(long stream) {
+        return ZstdMite.client().zm_initDStream(stream);
+    }
 
-    private native long decompressStreamNative(long stream, byte @NotNull [] dst, int dstOffset, int dstSize, byte @NotNull [] src, int srcOffset, int srcSize);
+    private long decompressStreamNative(long stream, byte @NotNull [] dst, int dstOffset, int dstSize, byte @NotNull [] src, int srcOffset, int srcSize) {
+        MiteIoPos positions = new MiteIoPos();
+        long result = ZstdMite.client().zm_dStreamDecompress(stream, dst, dstOffset, dstSize,
+                src, srcOffset, srcSize, positions);
+        this.consumed = positions.srcPos;
+        this.produced = positions.dstPos;
+        return result;
+    }
 
-    private static native long recommendedDOutSizeNative();
+    private static long recommendedDOutSizeNative() {
+        return ZstdMite.client().zm_DStreamOutSize();
+    }
 }

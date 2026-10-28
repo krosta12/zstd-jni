@@ -1,31 +1,53 @@
 package com.github.luben.zstd.util;
 
+import com.github.luben.zstd.mite.ZstdMite;
+
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.security.AccessController;
-import java.security.PrivilegedAction;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * Locates the native {@code zstd-mite} shared library for semi-mite.
+ * <p>
+ * Unlike the JNI version of zstd-jni this class no longer calls
+ * {@code System.loadLibrary} or {@code System.load}: semi-mite loads the
+ * library itself through {@link java.lang.foreign.SymbolLookup#libraryLookup}.
+ * This class only has to produce a filesystem path, extracting the bundled
+ * binary from the jar when necessary.
+ * <p>
+ * The lookup order is:
+ * <ol>
+ *     <li>{@code -DZstdNativePath=/absolute/path/to/library} - explicit override;</li>
+ *     <li>after {@link #assumeLoaded()}, a library found on {@code java.library.path};</li>
+ *     <li>the platform binary packaged in the jar under
+ *     {@code /<os>/<arch>/libzstd-mite.<ext>}, extracted to a temporary file.</li>
+ * </ol>
+ */
 public enum Native {
     ;
 
     private static final @NotNull String nativePathOverride = "ZstdNativePath";
     private static final @NotNull String tempFolderOverride = "ZstdTempFolder";
-    private static final @NotNull String libnameShort = "zstd-jni-" + ZstdVersion.VERSION;
+    private static final @NotNull String libnameShort = "zstd-mite";
     private static final @NotNull String libname = "lib" + libnameShort;
-    private static final @NotNull String errorMsg = "Unsupported OS/arch, cannot find " +
-        resourceName() + " or load " + libnameShort + " from system libraries. Please " +
-        "try building from source the jar or providing " + libname + " in your system.";
+
+    private static final @NotNull AtomicBoolean loaded = new AtomicBoolean(false);
+
+    private static volatile boolean assumedLoaded = false;
+    private static volatile @Nullable File tempFolder;
+    private static volatile @Nullable Path resolvedLibrary;
 
     private static @NotNull String osName() {
         String osProperty = System.getProperty("os.name");
         String os = (osProperty == null ? "" : osProperty).toLowerCase().replace(' ', '_');
-        if (os.startsWith("win")){
+        if (os.startsWith("win")) {
             return "win";
         } else if (os.startsWith("mac")) {
             return "darwin";
@@ -37,7 +59,7 @@ public enum Native {
     private static @NotNull String libExtension() {
         if (osName().contains("os_x") || osName().contains("darwin")) {
             return "dylib";
-         } else if (osName().contains("win")) {
+        } else if (osName().contains("win")) {
             return "dll";
         } else {
             return "so";
@@ -53,129 +75,128 @@ public enum Native {
         return "/" + os + "/" + arch + "/" + libname + "." + libExtension();
     }
 
-    private static @NotNull AtomicBoolean loaded = new AtomicBoolean(false);
+    private static @NotNull String errorMessage() {
+        return "Unsupported OS/arch, cannot find " + resourceName()
+                + " and no library was supplied. Build the native library "
+                + "(gradle nativeLibrary) or point -D" + nativePathOverride
+                + " at lib" + libnameShort + "." + libExtension() + ".";
+    }
 
     /**
-     * Tell the library to assume the native library is already loaded.
-     * This is escape hatch for environments that have special requirements for how
-     * the native part is loaded. This allows them to load the so/dll manually and tell
-     * zstd-jni to not attempt loading it again.
+     * Declares that the native library has already been provided by the host
+     * application. semi-mite still needs a path to load symbols from, so the
+     * library is looked up on {@code java.library.path} (or supplied through
+     * {@code -DZstdNativePath}).
      */
     public static synchronized void assumeLoaded() {
+        assumedLoaded = true;
         loaded.set(true);
     }
 
+    /**
+     * Returns whether {@link #load()} has completed.
+     *
+     * @return {@code true} once the semi-mite runtime owns the library
+     */
     public static synchronized boolean isLoaded() {
         return loaded.get();
     }
 
-    private static void loadLibrary(final @NotNull String libName) {
-        AccessController.doPrivileged(new PrivilegedAction<Void>() {
-          public @Nullable Void run() {
-            System.loadLibrary(libName);
-            return null;
-          }
-        });
-    }
-
-    private static void loadLibraryFile(final @NotNull String libFileName) {
-        AccessController.doPrivileged(new PrivilegedAction<Void>() {
-          public @Nullable Void run() {
-            System.load(libFileName);
-            return null;
-          }
-        });
-    }
-
+    /**
+     * Starts the semi-mite runtime, which loads the native library and creates
+     * the client proxy. Kept for source compatibility with the JNI version.
+     */
     public static synchronized void load() {
-        String tempFolder = System.getProperty(tempFolderOverride);
-        if (tempFolder == null) {
-            load(null);
-        } else {
-            load(new File(tempFolder));
-        }
+        ZstdMite.ensureLoaded();
+        loaded.set(true);
     }
 
-    public static synchronized void load(final @Nullable File tempFolder) {
-        if (loaded.get()) {
-            return;
+    /**
+     * Starts the runtime using an explicit temporary directory for the
+     * extracted library.
+     *
+     * @param folder directory used to unpack the bundled binary, or {@code null}
+     *               to use the default temporary directory
+     */
+    public static synchronized void load(final @Nullable File folder) {
+        tempFolder = folder;
+        load();
+    }
+
+    /**
+     * Returns the absolute path of the native library that semi-mite should
+     * load, extracting it from the classpath resources when needed.
+     *
+     * @return path to an existing shared library
+     * @throws UnsatisfiedLinkError if the platform binary cannot be found
+     */
+    public static synchronized @NotNull Path nativeLibraryPath() {
+        Path resolved = resolvedLibrary;
+        if (resolved != null) {
+            return resolved;
         }
-        String resourceName = resourceName();
 
         String overridePath = System.getProperty(nativePathOverride);
-        if (overridePath != null) {
-            // Do not fall back to auto-discovery - consumers know better
-            loadLibraryFile(overridePath);
+        if (overridePath != null && !overridePath.isBlank()) {
+            Path path = Path.of(overridePath).toAbsolutePath();
+            if (!Files.isRegularFile(path)) {
+                throw new UnsatisfiedLinkError(
+                        "-D" + nativePathOverride + " points at a missing file: " + path);
+            }
+            resolvedLibrary = path;
             loaded.set(true);
-            return;
+            return path;
         }
 
-        // try to load the shared library directly from the JAR or system path
-        try {
-            loadLibrary(libnameShort);
+        if (assumedLoaded) {
+            Path found = findOnLibraryPath();
+            if (found == null) {
+                throw new UnsatisfiedLinkError(
+                        "assumeLoaded() requires the library on java.library.path "
+                                + "or an explicit -D" + nativePathOverride + "; " + errorMessage());
+            }
+            resolvedLibrary = found;
             loaded.set(true);
-            return;
-        } catch (Throwable e) {
-            // ignore UnsatisfiedLinkError, and try other methods
+            return found;
         }
 
-        InputStream is = Native.class.getResourceAsStream(resourceName);
-        if (is == null) {
-            UnsatisfiedLinkError err = new UnsatisfiedLinkError("Failed to open resource " + resourceName + " as stream:\n" + errorMsg);
-            throw err;
-        }
-        File tempLib = null;
-        FileOutputStream out = null;
-        try {
-            tempLib = File.createTempFile(libname, "." + libExtension(), tempFolder);
-            // try to delete on exit, does not work on Windows
+        String resource = resourceName();
+        try (InputStream is = Native.class.getResourceAsStream(resource)) {
+            if (is == null) {
+                throw new UnsatisfiedLinkError("Failed to open resource " + resource + ": " + errorMessage());
+            }
+            File tempLib = File.createTempFile(libname + "-", "." + libExtension(), tempFolder);
             tempLib.deleteOnExit();
-            // copy to tempLib
-            out = new FileOutputStream(tempLib);
-            byte[] buf = new byte[4096];
-            while (true) {
-                int read = is.read(buf);
-                if (read == -1) {
-                    break;
-                }
-                out.write(buf, 0, read);
-            }
-            try {
-                out.flush();
-                out.close();
-                out = null;
-            } catch (IOException e) {
-                // ignore
-            }
-            try {
-                loadLibraryFile(tempLib.getAbsolutePath());
-            } catch (UnsatisfiedLinkError e) {
-                // display error in case problem with loading from temp folder
-                UnsatisfiedLinkError err = new UnsatisfiedLinkError(
-                        e.getMessage() + "\n" +
-                        errorMsg);
-                err.setStackTrace(e.getStackTrace());
-                throw err;
-            }
+            Files.copy(is, tempLib.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            Path path = tempLib.toPath().toAbsolutePath();
+            resolvedLibrary = path;
             loaded.set(true);
+            return path;
         } catch (IOException e) {
-            // IO errors in extracting and writing the shared object in the temp dir
             ExceptionInInitializerError err = new ExceptionInInitializerError(
                     "Cannot unpack " + libname + ": " + e.getMessage());
-            err.setStackTrace(e.getStackTrace());
+            err.initCause(e);
             throw err;
-        } finally {
-            try {
-                is.close();
-                if (out != null) {
-                    out.close();
-                }
-                if (tempLib != null && tempLib.exists()) {
-                    tempLib.delete();
-                }
-            } catch (IOException e) {
-                // ignore
+        }
+    }
+
+    /**
+     * Searches {@code java.library.path} for the {@code zstd-mite} library.
+     *
+     * @return the first match, or {@code null}
+     */
+    private static @Nullable Path findOnLibraryPath() {
+        String libraryPath = System.getProperty("java.library.path", "");
+        String fileName = libname + "." + libExtension();
+        for (String entry : libraryPath.split(File.pathSeparator)) {
+            if (entry.isBlank()) {
+                continue;
+            }
+            Path candidate = Path.of(entry, fileName);
+            if (Files.isRegularFile(candidate)) {
+                return candidate.toAbsolutePath();
             }
         }
+        return null;
     }
 }

@@ -1,0 +1,17 @@
+plugins {
+    // Resolves the JDK 22 toolchain used to compile and test the library.
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+}
+
+rootProject.name = 'zstd-jni'
+
+// semi-mite is developed alongside zstd-jni in this workspace. When the
+// sibling project is present it is used directly (composite build), so the
+// migration always builds against the current semi-mite source. If it is
+// absent, the dependency is resolved from the repositories declared in
+// build.gradle instead.
+def semiMitePath = providers.gradleProperty('semiMiteProject').getOrElse('../Fufa')
+def semiMiteProject = file(semiMitePath)
+if (semiMiteProject.isDirectory()) {
+    includeBuild(semiMiteProject)
+}

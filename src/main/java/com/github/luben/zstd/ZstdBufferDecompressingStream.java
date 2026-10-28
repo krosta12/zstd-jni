@@ -1,6 +1,6 @@
 package com.github.luben.zstd;
 
-import com.github.luben.zstd.util.Native;
+import com.github.luben.zstd.mite.ZstdMite;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.Closeable;
@@ -10,7 +10,7 @@ import java.nio.ByteBuffer;
 public class ZstdBufferDecompressingStream implements Closeable {
 
     static {
-        Native.load();
+        ZstdMite.ensureLoaded();
     }
 
     /**

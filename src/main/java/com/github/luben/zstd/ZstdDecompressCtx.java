@@ -1,6 +1,7 @@
 package com.github.luben.zstd;
 
-import com.github.luben.zstd.util.Native;
+import com.github.luben.zstd.mite.ByteBuffers;
+import com.github.luben.zstd.mite.ZstdMite;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -11,7 +12,7 @@ import java.util.Arrays;
 public class ZstdDecompressCtx extends AutoCloseBase {
 
     static {
-        Native.load();
+        ZstdMite.ensureLoaded();
     }
 
     private long nativePtr = 0;
@@ -19,9 +20,13 @@ public class ZstdDecompressCtx extends AutoCloseBase {
     @Nullable
     private ZstdDictDecompress decompression_dict = null;
 
-    private static native long init();
+    private static long init() {
+        return ZstdMite.client().zm_createDCtx();
+    }
 
-    private static native void free(long nativePtr);
+    private static void free(long nativePtr) {
+        ZstdMite.client().zm_freeDCtx(nativePtr);
+    }
 
     /**
      * Create a context for faster compress operations
@@ -111,7 +116,9 @@ public class ZstdDecompressCtx extends AutoCloseBase {
         return this;
     }
 
-    private static native long loadDDictFast0(long nativePtr, @Nullable ZstdDictDecompress dict);
+    private static long loadDDictFast0(long nativePtr, @Nullable ZstdDictDecompress dict) {
+        return ZstdMite.client().zm_refDDict(nativePtr, dict == null ? 0 : dict.nativePtr());
+    }
 
     /**
      * Load decompression dictionary.
@@ -137,7 +144,9 @@ public class ZstdDecompressCtx extends AutoCloseBase {
         return this;
     }
 
-    private static native long loadDDict0(long nativePtr, byte @Nullable [] dict);
+    private static long loadDDict0(long nativePtr, byte @Nullable [] dict) {
+        return ZstdMite.client().zm_loadDDict(nativePtr, dict, dict == null ? 0 : dict.length);
+    }
 
     /**
      * Clear all state and parameters from the decompression context. This leaves the object in a
@@ -161,7 +170,9 @@ public class ZstdDecompressCtx extends AutoCloseBase {
 
     }
 
-    private static native long reset0(long nativePtr);
+    private static long reset0(long nativePtr) {
+        return ZstdMite.client().zm_resetDCtx(nativePtr);
+    }
 
     private void ensureOpen() {
         if (nativePtr == 0) {
@@ -193,37 +204,41 @@ public class ZstdDecompressCtx extends AutoCloseBase {
 
         acquireSharedLock();
         try {
-            final long result;
-            if (dst.isDirect()) {
-                if (src.isDirect()) {
-                    result = decompressDirectByteBufferStream0(nativePtr, dst, dst.position(), dst.limit(), src,
-                            src.position(), src.limit());
-                } else {
-                    result = decompressByteArrayToDirectByteBufferStream0(nativePtr, dst, dst.position(), dst.limit(),
-                            src.array(), src.arrayOffset(), src.position(), src.limit());
-                }
-            } else if (src.isDirect()) {
-                result = decompressDirectByteBufferToByteArrayStream0(nativePtr, dst.array(), dst.arrayOffset(),
-                        dst.position(), dst.limit(), src, src.position(), src.limit());
-            } else {
-                result = decompressByteArrayStream0(nativePtr, dst.array(), dst.arrayOffset(), dst.position(),
-                        dst.limit(), src.array(), src.arrayOffset(), src.position(), src.limit());
-            }
-            return updateStreamPositions(result, dst, src);
+            return decompressStreamImpl(dst, src);
         } finally {
             releaseSharedLock();
         }
     }
 
-    private static native long decompressByteArrayToDirectByteBufferStream0(long nativePtr, @NotNull ByteBuffer dst,
-            int dstOffset, int dstSize, byte @NotNull [] src, int srcArrayOffset, int srcOffset, int srcSize);
+    /**
+     * Shared implementation of the buffer-stream entry points. Both buffers may
+     * be direct or array-backed: the affected regions are copied into arrays,
+     * handed to semi-mite, and the produced bytes and positions are written
+     * back afterwards.
+     */
+    private boolean decompressStreamImpl(@NotNull ByteBuffer dst, @NotNull ByteBuffer src) {
+        int dstStart = dst.position();
+        int dstLength = dst.limit() - dstStart;
+        int srcStart = src.position();
+        int srcLength = src.limit() - srcStart;
 
-    private static native long decompressDirectByteBufferToByteArrayStream0(long nativePtr, byte @NotNull [] dst,
-            int dstArrayOffset, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize);
+        byte[] dstCopy = ByteBuffers.read(dst, dstStart, dstLength);
+        byte[] srcCopy = ByteBuffers.read(src, srcStart, srcLength);
 
-    private static native long decompressByteArrayStream0(long nativePtr, byte @NotNull [] dst, int dstArrayOffset,
-            int dstOffset, int dstSize,
-            byte @NotNull [] src, int srcArrayOffset, int srcOffset, int srcSize);
+        long result = ZstdMite.client().zm_decompressStream(nativePtr,
+                dstCopy, 0, dstLength, srcCopy, 0, srcLength);
+        if ((result & 0x80000000L) != 0) {
+            long code = -(result & 0xFF);
+            throw new ZstdException(code, Zstd.getErrorName(code));
+        }
+
+        int produced = (int) (result >>> 32) & 0x7FFFFFFF;
+        int consumed = (int) result & 0x7FFFFFFF;
+        ByteBuffers.write(dst, dstStart, dstCopy, 0, produced);
+        dst.position(dstStart + produced);
+        src.position(srcStart + consumed);
+        return (result >>> 63) == 1;
+    }
 
     /**
      * Decompress as much of the <code>src</code> {@link ByteBuffer} into the <code>dst</code> {@link
@@ -237,31 +252,11 @@ public class ZstdDecompressCtx extends AutoCloseBase {
         ensureOpen();
         acquireSharedLock();
         try {
-            long result = decompressDirectByteBufferStream0(nativePtr, dst, dst.position(), dst.limit(), src, src.position(), src.limit());
-            return updateStreamPositions(result, dst, src);
+            return decompressStreamImpl(dst, src);
         } finally {
             releaseSharedLock();
         }
     }
-
-    private static boolean updateStreamPositions(long result, @NotNull ByteBuffer dst, @NotNull ByteBuffer src) {
-        if ((result & 0x80000000L) != 0) {
-            long code = -(result & 0xFF);
-            throw new ZstdException(code, Zstd.getErrorName(code));
-        }
-        src.position((int) (result & 0x7FFFFFFF));
-        dst.position((int) (result >>> 32) & 0x7FFFFFFF);
-        return (result >>> 63) == 1;
-    }
-
-    /**
-     * 4 pieces of information are packed into the return value of this method, which must be
-     * treated as an unsigned long. The highest bit is set if all data has been flushed from
-     * internal buffers. The next 31 bits are the new position of the destination buffer. The next
-     * bit is set if an error occurred. If an error occurred, the lowest 31 bits encode a zstd error
-     * code. Otherwise, the lowest 31 bits are the new position of the source buffer.
-     */
-    private static native long decompressDirectByteBufferStream0(long nativePtr, @NotNull ByteBuffer dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize);
 
     /**
      * Decompresses buffer 'srcBuff' into buffer 'dstBuff' using this ZstdDecompressCtx.
@@ -305,7 +300,15 @@ public class ZstdDecompressCtx extends AutoCloseBase {
         }
     }
 
-    private static native long decompressDirectByteBuffer0(long nativePtr, @NotNull ByteBuffer dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize);
+    private static long decompressDirectByteBuffer0(long nativePtr, @NotNull ByteBuffer dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize) {
+        byte[] dstCopy = ByteBuffers.read(dst, dstOffset, dstSize);
+        byte[] srcCopy = ByteBuffers.read(src, srcOffset, srcSize);
+        long size = ZstdMite.client().zm_decompressDCtx(nativePtr, dstCopy, 0, dstSize, srcCopy, 0, srcSize);
+        if (!Zstd.isError(size) && size > 0) {
+            ByteBuffers.write(dst, dstOffset, dstCopy, 0, (int) size);
+        }
+        return size;
+    }
 
     /**
      * Decompresses byte array 'srcBuff' into byte array 'dstBuff' using this ZstdDecompressCtx.
@@ -341,7 +344,9 @@ public class ZstdDecompressCtx extends AutoCloseBase {
         }
     }
 
-    private static native long decompressByteArray0(long nativePtr, byte @NotNull [] dst, int dstOffset, int dstSize, byte @NotNull [] src, int srcOffset, int srcSize);
+    private static long decompressByteArray0(long nativePtr, byte @NotNull [] dst, int dstOffset, int dstSize, byte @NotNull [] src, int srcOffset, int srcSize) {
+        return ZstdMite.client().zm_decompressDCtx(nativePtr, dst, dstOffset, dstSize, src, srcOffset, srcSize);
+    }
 
     public int decompressByteArrayToDirectByteBuffer(@NotNull ByteBuffer dstBuff, int dstOffset, int dstSize, byte @NotNull [] srcBuff, int srcOffset, int srcSize) {
         if (!dstBuff.isDirect()) {
@@ -368,7 +373,14 @@ public class ZstdDecompressCtx extends AutoCloseBase {
         }
     }
 
-    private static native long decompressByteArrayToDirectByteBuffer0(long nativePtr, @NotNull ByteBuffer dst, int dstOffset, int dstSize, byte @NotNull [] src, int srcOffset, int srcSize);
+    private static long decompressByteArrayToDirectByteBuffer0(long nativePtr, @NotNull ByteBuffer dst, int dstOffset, int dstSize, byte @NotNull [] src, int srcOffset, int srcSize) {
+        byte[] dstCopy = ByteBuffers.read(dst, dstOffset, dstSize);
+        long size = ZstdMite.client().zm_decompressDCtx(nativePtr, dstCopy, 0, dstSize, src, srcOffset, srcSize);
+        if (!Zstd.isError(size) && size > 0) {
+            ByteBuffers.write(dst, dstOffset, dstCopy, 0, (int) size);
+        }
+        return size;
+    }
 
     public int decompressDirectByteBufferToByteArray(byte @NotNull [] dstBuff, int dstOffset, int dstSize, @NotNull ByteBuffer srcBuff, int srcOffset, int srcSize) {
         if (!srcBuff.isDirect()) {
@@ -395,7 +407,10 @@ public class ZstdDecompressCtx extends AutoCloseBase {
         }
     }
 
-    private static native long decompressDirectByteBufferToByteArray0(long nativePtr, byte @NotNull [] dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize);
+    private static long decompressDirectByteBufferToByteArray0(long nativePtr, byte @NotNull [] dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize) {
+        byte[] srcCopy = ByteBuffers.read(src, srcOffset, srcSize);
+        return ZstdMite.client().zm_decompressDCtx(nativePtr, dst, dstOffset, dstSize, srcCopy, 0, srcSize);
+    }
 
     /* Covenience methods */
 

@@ -1,202 +1,214 @@
-Zstd-jni
-========
+# zstd-jni — semi-mite edition
 
-[![CI](https://github.com/luben/zstd-jni/workflows/CI/badge.svg)](https://github.com/luben/zstd-jni/actions)
-[![codecov.io](http://codecov.io/github/luben/zstd-jni/coverage.svg?branch=master)](http://codecov.io/github/luben/zstd-jni?branch=master)
-[![Maven Central](https://img.shields.io/maven-central/v/com.github.luben/zstd-jni.svg?label=Maven%20Central)](https://search.maven.org/artifact/com.github.luben/zstd-jni/)
-[![Javadocs](https://www.javadoc.io/badge/com.github.luben/zstd-jni.svg)](https://www.javadoc.io/doc/com.github.luben/zstd-jni)
+Java bindings for the **Zstandard** compression library, with the native layer
+completely migrated from JNI (and from hand-written Project Panama code) to
+[semi-mite](https://github.com/krosta12/semi-mite).
 
-Overview
---------
+This tree contains **no JNI code and no `java.lang.foreign` usage**:
 
-JNI bindings for **Zstd** native library that provides fast and high
-compression lossless algorithm for Android, Java and all JVM languages:
+* the `jni/` directory, every `jni_*.c` shim, the Panama shim `ffm_zstd.c` and
+  the whole `src/main/java22` FFM implementation are gone;
+* all native calls go through one `@MiteClient` interface
+  (`com.github.luben.zstd.mite.ZstdNativeClient`);
+* semi-mite, the framework the project now depends on, is the only component
+  that touches the Foreign Function & Memory API.
 
-* static compress/decompress methods
+The public `com.github.luben.zstd` API is unchanged: the same classes, method
+signatures and behaviour as the JNI/Panama releases.
 
-* implementation of InputStream and OutputStream for transparent compression
-of data streams fully compatible with the "zstd" program.
+## How it works
 
-* minimal performance overhead
-
-Zstd
-----
-
-**Zstd**, short for Zstandard, is a new lossless compression algorithm, which
-provides both good compression ratio _and_ speed for your standard compression
-needs. "Standard" translates into everyday situations which neither look for
-highest possible ratio (which LZMA and ZPAQ cover) nor extreme speeds (which
-LZ4 covers).
-
-**Zstd** is developed by Yann Collet and the source is available at:
-https://github.com/facebook/zstd
-
-The motivation for development, the algorithm used and its properties are
-explained in the blog post that introduces the library:
-http://fastcompression.blogspot.com/2015/01/zstd-stronger-compression-algorithm.html
-
-Status and availability
------------------------
-
-**Zstd** is production ready with a stable format.
-
-**Zstd-jni** is tracking the release branch of **Zstd** (master) *without*
-compatibility support for the legacy formats. The last version that was
-released with support for the legacy formats (0.4 - 0.7) is `1.5.7-12`.
-
-**Zstd-jni** version uses the base **Zstd** version with **Zstd-jni** release
-appended with a dash, e.g. "1.2.0-2" is the second **Zstd-jni** release based
-on **Zstd** version 1.2.0.
-
-Limitations
------------
-The Java classes cannot be renamed/minimized/relocated. JVM linking the native
-library depends on the class name that is trying to link the native part, so
-changing the class names will lead to failed linking at runtime.
-
-Foreign Function & Memory API
------------------------------
-
-The library's native operations have been ported from JNI to the Foreign
-Function & Memory API ([JEP 454](https://openjdk.org/jeps/454)). Every class
-that calls into libzstd has an FFM version. These are compiled for JDK 22 and
-shipped inside the same Jar under `META-INF/versions/22`, which makes it a
-Multi-Release Jar: a JDK 22+ runtime loads them, anything older keeps loading
-the JNI implementation from the Jar root. The public API and the behaviour are
-identical either way, so there is nothing to configure and nothing to change in
-your code.
-
-If you need to force the JNI implementation on a JDK 22+ runtime, start the
-JVM with:
-
-    -Djdk.util.jar.enableMultiRelease=false
-
-Note that this disables Multi-Release dispatch for *every* Jar on the
-classpath, not just this one, so it is an escape hatch rather than a supported
-configuration. Repackaging into a fat Jar has the same effect whenever the
-`Multi-Release: true` manifest attribute is not carried over.
-
-Building and dependencies
--------------------------
-
-**Zstd-jni** uses SBT for building the library and running the tests.
-
-The build system depends on Scala and the tests depend on ScalaTest and
-ScalaCheck but the produced JAR does not have any dependencies. It also
-embeds the native library.
-
-*Note*: For the moment the project depends on a local build of `sbt-java-module-info`
-v0.5.2, as that version is not published to Maven. Before compiling, you need to publish it locally:
 ```
-$ cd sbt-java-module-info && ./sbt publishLocal && cd -
+Java public API (Zstd, ZstdCompressCtx, streams, dictionaries, …)
+        │
+        ▼
+ZstdNativeClient  ← @MiteClient interface, one flat method per native operation
+        │
+        ▼
+semi-mite proxy  ← builds FunctionDescriptors, looks up symbols, marshals
+        │
+        ▼
+libzstd-mite (C) ← src/main/native/zstd_mite.c + the vendored libzstd sources
+        │
+        ▼
+Zstandard
 ```
 
-Compile and test:
+* `ZstdNativeClient` declares the complete native boundary with primitives,
+  `byte[]` buffers and `long` handles. semi-mite derives the FFM descriptors
+  from those Java signatures when the pre-built library is loaded
+  (`Mite.use(...)`), so there is no generated binding code to maintain.
+* Opaque zstd objects (`ZSTD_CCtx*`, `ZSTD_DCtx*`, `ZSTD_CDict*`, `ZSTD_DDict*`,
+  stream objects) are carried as `long` handles. On the C side they are
+  `long long`, which keeps the ABI identical on Windows (where C `long` is
+  32-bit) and on 64-bit Unix.
+* `src/main/native/zstd_mite.c` is a thin, JNI-free facade over the zstd
+  advanced API. It replaces the eight former JNI files one function at a time;
+  the Java-side logic (offset validation, error handling, stream position
+  bookkeeping) is preserved.
+* `ZstdMite` locates the native library (or extracts the bundled binary from
+  the jar), starts the semi-mite context and holds the single client proxy for
+  the lifetime of the JVM. `com.github.luben.zstd.util.Native` is reduced to
+  path resolution; it no longer calls `System.loadLibrary`.
+
+## Requirements
+
+* **JDK 22+** — the Foreign Function & Memory API used by semi-mite is final
+  there. The previous JNI build supported older JDKs and Android; that is no
+  longer possible with this backend.
+* A **64-bit JVM** — semi-mite's pointer-size validation requires 8-byte
+  pointers.
+* A C compiler for the native library: `gcc` or `clang` (`cl` also works with
+  the provided CMake project).
+* semi-mite **0.2.0 or newer**. The published semi-mite 0.1.5 maps Java `long`
+  to C `long`, which is 4 bytes on Windows and therefore cannot carry native
+  handles; 0.2.0 maps `long` to `long long` as the bridge requires.
+
+The Gradle build expects the semi-mite project in the sibling directory
+`../Fufa` (this is the workspace layout) and uses it through a Gradle composite
+build. The path can be overridden with `-PsemiMiteProject=/path/to/semi-mite`.
+If semi-mite 0.2.0 is published to Maven Local or Maven Central instead, the
+`includeBuild` in `settings.gradle` can simply be removed; for the sibling
+checkout, the equivalent local publication is:
+
+```bash
+cd ../Fufa && ./gradlew publishToMavenLocal
 ```
- $ ./sbt compile test package
+
+Gradle resolves a JDK 22 toolchain (auto-provisioning it through the Foojay
+resolver when no local JDK 22 is installed).
+
+## Building
+
+```bash
+./gradlew test      # builds libzstd-mite for the host platform and runs the suite
+./gradlew jar       # packages classes + the host platform's native library
 ```
 
-*Note*: packaging does not wait for the native library to be built, so run `compile` as a separate,
-earlier command (as above) before anything that packages the jar.
+The native library is compiled by the `nativeLibrary` Gradle task from
+`src/main/native/*.c` (the vendored zstd sources plus `zstd_mite.c`). It is
+placed under `build/native/<os>/<arch>/` and copied into the jar at
+`/<os>/<arch>/libzstd-mite.<ext>`, which is where `Native` looks for it at
+runtime.
 
-*Note*: `./sbt test` covers the JNI implementation only. The JDK 22+ one built on the Foreign Function
-& Memory API ships in `META-INF/versions/22`, and Multi-Release dispatch only happens from a jar, so
-testing it means packaging first and then choosing the runtime:
-```
- $ ./sbt compile testFromJarSetup testFromJar
-```
+If you prefer CMake:
 
-If you want to publish it to you local ivy2 repository:
-```
- $ ./sbt compile publishLocal
+```bash
+cmake -S . -B build/cmake
+cmake --build build/cmake
 ```
 
-Binary releases
----------------
+Cross-platform jars are not produced by a single build; build the native
+library once per target platform and place the results under the corresponding
+`/<os>/<arch>/` resource path.
 
-The binary releases are architecture dependent because we are embedding the
-native library in the provided Jar file. Currently they are built for
-*linux-amd64*, *linux-i386*, *linux-aarch64*, *linux-armhf*, *linux-ppc64*,
-*linux-ppc64le*, *linux-s390x*, *linux-riscv64*, *linux-loongarch64*,
-*win-amd64*, *win-x86*, *win-aarch64*, *darwin-x86_64* (MacOS X), *darwin-aarch64*,
-*aix-ppc64*, *freebsd-amd64*, and *freebsd-i386*.
+## Using the library
 
-More builds will be available if I get access to more platforms.
+The Maven coordinates and the API remain the same as upstream zstd-jni:
 
-You can find published releases on Maven Central.
+```java
+byte[] compressed = Zstd.compress(input, 3);
+byte[] restored   = Zstd.decompress(compressed, input.length);
+```
 
-    <dependency>
-        <groupId>com.github.luben</groupId>
-        <artifactId>zstd-jni</artifactId>
-        <version>VERSION</version>
-    </dependency>
+Streams, contexts and dictionaries work exactly as documented upstream:
 
-sbt dependency:
+```java
+try (ZstdCompressCtx ctx = new ZstdCompressCtx()) {
+    ctx.setLevel(6).setChecksum(true);
+    byte[] compressed = ctx.compress(input);
+}
 
-    libraryDependencies += "com.github.luben" % "zstd-jni" % "VERSION"
+try (ZstdOutputStream out = new ZstdOutputStream(fileOut, 3)) {
+    out.write(input);
+}
+```
 
-Single architecture classified jars are also published. The classifier name is
-following the "$OS_$ARCH" convention. There is also a "cloud" classifier that
-packs binaries just for *linux-amd64*, *linux-aarch64* (for deployment), and
-*darwin-aarch64* (to help local development).
+At runtime semi-mite needs the native library on disk. It is normally extracted
+from the jar into the system temporary directory. The following system
+properties are supported:
 
-They can be used like:
+| Property          | Meaning                                                              |
+| ----------------- | -------------------------------------------------------------------- |
+| `ZstdNativePath`  | Absolute path to an already-built `libzstd-mite` library.             |
+| `ZstdTempFolder`  | Directory used when extracting the bundled library from the jar.      |
 
-    <dependency>
-        <groupId>com.github.luben</groupId>
-        <artifactId>zstd-jni</artifactId>
-        <version>VERSION</version>
-        <classifier>linux_amd64</classifier>
-    </dependency>
+Because semi-mite uses FFM, run the JVM with `--enable-native-access=ALL-UNNAMED`
+(or add the equivalent `Enable-Native-Access` manifest attribute) to avoid the
+restricted-method warning on recent JDKs.
 
-or for sbt:
+## What changed in the migration
 
-    libraryDependencies += "com.github.luben" % "zstd-jni" % "VERSION" classifier "linux_amd64"
+| Area                | Before                                     | After                                              |
+| ------------------- | ------------------------------------------ | -------------------------------------------------- |
+| Native boundary     | `native` methods in eight JNI classes       | one `@MiteClient` interface, `zm_*` functions       |
+| C layer             | JNI shims (`JNIEnv`, `jbyteArray`, fields)  | flat C functions (`zstd_mite.c`)                    |
+| JDK 22+ path        | `src/main/java22` + `ZstdBinding` on FFM    | deleted; one implementation for all supported JDKs  |
+| Library loading     | `System.load` / `System.loadLibrary`        | `Mite.use(path)` → `SymbolLookup.libraryLookup`     |
+| Array handing       | `GetPrimitiveArrayCritical` (zero-copy)     | semi-mite copies into the per-call arena            |
+| Direct `ByteBuffer` | `GetDirectBufferAddress` (zero-copy)        | region copied in/out at the Java boundary           |
+| Dict `byReference`  | CDict/DDict borrowed the direct buffer      | dictionary content is copied (semantics preserved)  |
+| Minimum JDK         | 8 (JNI) / 22 (FFM)                          | 22                                                  |
+| Android             | JNI build supported                         | not supported (FFM is unavailable on Android)       |
 
-Link for direct download if you don't use a dependency manager:
+### Behavioural notes
 
- - https://repo1.maven.org/maven2/com/github/luben/zstd-jni/
+* The performance characteristics differ: the common `byte[]` and direct-buffer
+  calls now make one extra copy at the Java/native boundary. The API contract
+  (positions, limits, returned sizes, error codes) is unchanged, and the
+  streaming classes still reuse their buffers. For throughput-critical code,
+  reuse `ZstdCompressCtx`/`ZstdDecompressCtx`, which is also what the upstream
+  documentation recommends.
+* `ZstdDictCompress(ByteBuffer, …, byReference)` and
+  `ZstdDictDecompress(ByteBuffer, byReference)` always copy the dictionary
+  content. This is safer than borrowing caller memory, and the documented
+  contract (“the buffer may be reused after the call”) still holds for the
+  default constructors. A buffer passed with `byReference = true` is no longer
+  read by native code afterwards, so mutating it cannot corrupt the dictionary.
+* `Native.assumeLoaded()` is kept for source compatibility, but semi-mite still
+  needs a path to resolve symbols. The library is then searched on
+  `java.library.path`, or `ZstdNativePath` must be set.
+* The semi-mite context is intentionally never closed by zstd-jni: contexts and
+  dictionaries may live until process exit and unloading a live library is not
+  safe. A JVM shutdown reclaims it.
+* The native library is named `libzstd-mite` rather than `libzstd-jni`; the
+  public Java package names are untouched.
+* Do not relocate/shade `com.github.luben.zstd.mite`: semi-mite discovers the
+  `@MiteClient` interface by scanning that package and binds its methods to the
+  exported C symbols by name.
+* No `--add-opens`, no JNI headers, no `jni.h` and no generated glue code are
+  involved.
 
-If there is not yet a binary release compatible with your platform look how
-to build it locally under the [Building](#building-and-dependencies) section.
+## Testing
 
-Android support
----------------
+`./gradlew test` runs 54 tests, including:
 
-Zstd-jni is usable in Android applications by importing the sources in Android
-Studio. I guess using git submodules will also work. Import *src/main/java*
-rather than *src/main* as a whole: *src/main/java22* holds an alternative
-implementation of a few classes built on the Java 22 `java.lang.foreign` API,
-which the published jar ships under `META-INF/versions/22` for JDK 22+ runtimes
-only. It duplicates class names from *src/main/java* and does not compile on
-Android.
+* byte-array and `ByteBuffer` round trips at several compression levels;
+* streaming through `ZstdInputStream`/`ZstdOutputStream`, the buffer streams,
+  the direct-buffer streams and the `Zstd*Ctx` ByteBuffer API;
+* dictionaries (prepared, trained, offset/length, direct buffers, streams) and
+  the dictionary trainer (cover and legacy algorithms);
+* frame introspection, magicless frames, checksums, content-size control,
+  pledged sizes, frame progression and the zstd error constants;
+* decompression of pre-compressed frames from `src/test/resources`;
+* a reflection test asserting that no public class has `native` methods and
+  that the boundary is a semi-mite `@MiteClient`;
+* concurrent use of the shared semi-mite proxy.
 
-Android archive (*zstd-jni.aar*) is also published on maven central that
-support Android 5.0 and above. You will need to add the repository in your
-build.gradle, e.g.:
+## Zstd
 
-    allprojects {
-        repositories {
-            jcenter()
-            mavenCentral()
-        }
-    }
+**Zstd**, short for Zstandard, is a lossless compression algorithm that
+provides a good ratio *and* speed. It is developed by Yann Collet and the
+source is available at <https://github.com/facebook/zstd>.
 
-as it is not added by default by Android Studio. And then add dependency on the
-prebuilt android archive (aar):
+This tree vendors the zstd sources under `src/main/native` (see the upstream
+README and licenses there). The zstd-jni version is the zstd base version plus
+the binding revision, e.g. `1.5.7-25`.
 
-    dependencies {
-        implementation "com.github.luben:zstd-jni:VERSION@aar"
-        testImplementation "com.github.luben:zstd-jni:VERSION"
-    }
+## License
 
-For example Android app and how to declare dependencies and use zstd-jni, consult
-the 2nd and 3rd commit of: https://github.com/luben/ZstdAndroidExample
+The Java bindings remain under the 2-clause BSD license; the native zstd
+library is licensed under the 3-clause BSD license or GPL2. See `LICENSE` and
+the license files under `src/main/native` for the full conditions.
 
-License
--------
-
-The code for these JNI bindings is licenced under 2-clause BSD license.
-The native **Zstd** library is licensed under 3-clause BSD license or
-GPL2. See the LICENSE file and LICENSE and COPYRIGHT in src/main/native
-for full copyright and conditions.
+The original zstd-jni project is at <https://github.com/luben/zstd-jni>.

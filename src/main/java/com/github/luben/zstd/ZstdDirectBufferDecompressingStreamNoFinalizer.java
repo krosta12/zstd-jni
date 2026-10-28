@@ -1,6 +1,8 @@
 package com.github.luben.zstd;
 
-import com.github.luben.zstd.util.Native;
+import com.github.luben.zstd.mite.ByteBuffers;
+import com.github.luben.zstd.mite.MiteIoPos;
+import com.github.luben.zstd.mite.ZstdMite;
 
 import org.jetbrains.annotations.NotNull;
 
@@ -9,7 +11,7 @@ import java.nio.ByteBuffer;
 
 public class ZstdDirectBufferDecompressingStreamNoFinalizer extends BaseZstdBufferDecompressingStreamNoFinalizer {
     static {
-        Native.load();
+        ZstdMite.ensureLoaded();
     }
 
     public ZstdDirectBufferDecompressingStreamNoFinalizer(@NotNull ByteBuffer source) {
@@ -54,13 +56,33 @@ public class ZstdDirectBufferDecompressingStreamNoFinalizer extends BaseZstdBuff
         return (int) recommendedDOutSizeNative();
     }
 
-    private static native long createDStreamNative();
+    private static long createDStreamNative() {
+        return ZstdMite.client().zm_createDStream();
+    }
 
-    private static native long freeDStreamNative(long stream);
+    private static long freeDStreamNative(long stream) {
+        return ZstdMite.client().zm_freeDStream(stream);
+    }
 
-    private native long initDStreamNative(long stream);
+    private long initDStreamNative(long stream) {
+        return ZstdMite.client().zm_initDStream(stream);
+    }
 
-    private native long decompressStreamNative(long stream, @NotNull ByteBuffer dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize);
+    private long decompressStreamNative(long stream, @NotNull ByteBuffer dst, int dstOffset, int dstSize, @NotNull ByteBuffer src, int srcOffset, int srcSize) {
+        MiteIoPos positions = new MiteIoPos();
+        byte[] dstCopy = ByteBuffers.read(dst, dstOffset, dstSize);
+        byte[] srcCopy = ByteBuffers.read(src, srcOffset, srcSize);
+        long result = ZstdMite.client().zm_dStreamDecompress(stream, dstCopy, 0, dstSize,
+                srcCopy, 0, srcSize, positions);
+        this.consumed = positions.srcPos;
+        this.produced = positions.dstPos;
+        if (!Zstd.isError(result) && positions.dstPos > 0) {
+            ByteBuffers.write(dst, dstOffset, dstCopy, 0, positions.dstPos);
+        }
+        return result;
+    }
 
-    private static native long recommendedDOutSizeNative();
+    private static long recommendedDOutSizeNative() {
+        return ZstdMite.client().zm_DStreamOutSize();
+    }
 }

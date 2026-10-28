@@ -1,6 +1,7 @@
 package com.github.luben.zstd;
 
-import com.github.luben.zstd.util.Native;
+import com.github.luben.zstd.mite.MiteIoPos;
+import com.github.luben.zstd.mite.ZstdMite;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -23,7 +24,7 @@ import java.util.LinkedList;
 public class ZstdInputStreamNoFinalizer extends FilterInputStream {
 
     static {
-        Native.load();
+        ZstdMite.ensureLoaded();
     }
 
     // Opaque pointer to Zstd context object
@@ -44,14 +45,43 @@ public class ZstdInputStreamNoFinalizer extends FilterInputStream {
     // keep the active dict(s) alive
     private LinkedList<ZstdDictDecompress> active_dicts =  new LinkedList<ZstdDictDecompress>();
 
-    /* JNI methods */
-    public static native long recommendedDInSize();
-    public static native long recommendedDOutSize();
-    private static native long createDStream();
-    private static native long  freeDStream(long stream);
-    private native int  initDStream(long stream);
-    private static native long  resetDStream(long stream);
-    private native long  decompressStream(long stream, byte @NotNull [] dst, int dst_size, byte @NotNull [] src, int src_size);
+    /* semi-mite bridge methods */
+    public static long recommendedDInSize() {
+        return ZstdMite.client().zm_DStreamInSize();
+    }
+
+    public static long recommendedDOutSize() {
+        return ZstdMite.client().zm_DStreamOutSize();
+    }
+
+    private static long createDStream() {
+        return ZstdMite.client().zm_createDStream();
+    }
+
+    private static long  freeDStream(long stream) {
+        return ZstdMite.client().zm_freeDStream(stream);
+    }
+
+    private int  initDStream(long stream) {
+        // The old JNI method only cached field ids; there is nothing to do now.
+        return 0;
+    }
+
+    private static long  resetDStream(long stream) {
+        return ZstdMite.client().zm_resetDStream(stream);
+    }
+
+    private long  decompressStream(long stream, byte @NotNull [] dst, int dst_size, byte @NotNull [] src, int src_size) {
+        int dstStart = (int) dstPos;
+        int srcStart = (int) srcPos;
+        MiteIoPos positions = new MiteIoPos();
+        long result = ZstdMite.client().zm_dStreamDecompress(stream,
+                dst, dstStart, dst_size - dstStart,
+                src, srcStart, src_size - srcStart, positions);
+        dstPos = dstStart + positions.dstPos;
+        srcPos = srcStart + positions.srcPos;
+        return result;
+    }
 
     /**
      * create a new decompressing InputStream
